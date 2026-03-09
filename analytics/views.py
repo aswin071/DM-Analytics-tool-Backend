@@ -25,6 +25,14 @@ from .services import (
     get_platform_breakdown,
 )
 from .platform_clients import get_client, PLATFORM_CLIENTS
+from django.contrib.auth.models import User
+
+
+def _get_user(request):
+    """Return the authenticated user, or fall back to the demo user for public access."""
+    if request.user and request.user.is_authenticated:
+        return request.user
+    return User.objects.filter(username='demo').first()
 
 
 # ── Auth ──
@@ -45,7 +53,7 @@ class RegisterView(generics.CreateAPIView):
 
 @api_view(['GET'])
 def me_view(request):
-    return Response(UserSerializer(request.user).data)
+    return Response(UserSerializer(_get_user(request)).data)
 
 
 # ── Platform Connections ──
@@ -54,13 +62,13 @@ class PlatformListView(generics.ListAPIView):
     serializer_class = SocialPlatformSerializer
 
     def get_queryset(self):
-        return SocialPlatform.objects.filter(user=self.request.user)
+        return SocialPlatform.objects.filter(user=_get_user(self.request))
 
 
 @api_view(['GET'])
 def available_platforms(request):
     connected = set(
-        SocialPlatform.objects.filter(user=request.user, is_active=True)
+        SocialPlatform.objects.filter(user=_get_user(request), is_active=True)
         .values_list('platform', flat=True)
     )
     platforms = []
@@ -81,7 +89,7 @@ def connect_platform_url(request, platform):
 
     client_class = PLATFORM_CLIENTS[platform]
     client = client_class()
-    auth_url = client.get_auth_url(state=str(request.user.id))
+    auth_url = client.get_auth_url(state=str(_get_user(request).id))
 
     if not auth_url:
         return Response({'error': f'{platform} does not support OAuth. Use manual setup.'}, status=400)
@@ -113,7 +121,7 @@ def platform_callback(request, platform):
         token_data = client.exchange_code(code, **kwargs)
 
         connection, created = SocialPlatform.objects.update_or_create(
-            user=request.user,
+            user=_get_user(request),
             platform=platform,
             platform_user_id=token_data.get('platform_user_id', ''),
             defaults={
@@ -138,7 +146,7 @@ def setup_whatsapp(request):
     serializer.is_valid(raise_exception=True)
 
     connection, _ = SocialPlatform.objects.update_or_create(
-        user=request.user,
+        user=_get_user(request),
         platform='whatsapp',
         platform_user_id=serializer.validated_data['phone_number_id'],
         defaults={
@@ -152,7 +160,7 @@ def setup_whatsapp(request):
 
 @api_view(['POST'])
 def disconnect_platform(request, pk):
-    connection = get_object_or_404(SocialPlatform, pk=pk, user=request.user)
+    connection = get_object_or_404(SocialPlatform, pk=pk, user=_get_user(request))
     connection.is_active = False
     connection.save(update_fields=['is_active'])
     return Response({'status': 'disconnected'})
@@ -160,7 +168,7 @@ def disconnect_platform(request, pk):
 
 @api_view(['POST'])
 def reconnect_platform(request, pk):
-    connection = get_object_or_404(SocialPlatform, pk=pk, user=request.user)
+    connection = get_object_or_404(SocialPlatform, pk=pk, user=_get_user(request))
     connection.is_active = True
     connection.save(update_fields=['is_active'])
     return Response(SocialPlatformSerializer(connection).data)
@@ -220,10 +228,10 @@ class ProductViewSet(viewsets.ModelViewSet):
     ordering_fields = ['name', 'price', 'created_at']
 
     def get_queryset(self):
-        return Product.objects.filter(user=self.request.user)
+        return Product.objects.filter(user=_get_user(self.request))
 
     def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
+        serializer.save(user=_get_user(self.request))
 
     @action(detail=True, methods=['get'])
     def analytics(self, request, pk=None):
@@ -252,7 +260,7 @@ def upload_catalog(request):
     if csv_file.size > 5 * 1024 * 1024:
         return Response({'error': 'File too large (max 5MB).'}, status=400)
 
-    imported, failed, errors = import_catalog_csv(request.user, csv_file)
+    imported, failed, errors = import_catalog_csv(_get_user(request), csv_file)
     return Response({
         'imported': imported,
         'failed': failed,
@@ -274,7 +282,7 @@ def download_csv_template(request):
 
 @api_view(['GET'])
 def catalog_upload_history(request):
-    uploads = CatalogUpload.objects.filter(user=request.user).order_by('-uploaded_at')[:20]
+    uploads = CatalogUpload.objects.filter(user=_get_user(request)).order_by('-uploaded_at')[:20]
     return Response(CatalogUploadSerializer(uploads, many=True).data)
 
 
@@ -285,7 +293,7 @@ class DMListView(generics.ListAPIView):
 
     def get_queryset(self):
         qs = DirectMessage.objects.filter(
-            user=self.request.user
+            user=_get_user(self.request)
         ).select_related('platform', 'classification').prefetch_related(
             'classification__matched_products'
         )
@@ -337,7 +345,7 @@ class DMListView(generics.ListAPIView):
 
 @api_view(['POST'])
 def toggle_resolved(request, pk):
-    dm = get_object_or_404(DirectMessage, pk=pk, user=request.user)
+    dm = get_object_or_404(DirectMessage, pk=pk, user=_get_user(request))
     dm.is_resolved = not dm.is_resolved
     dm.save(update_fields=['is_resolved'])
     return Response({'id': dm.id, 'is_resolved': dm.is_resolved})
@@ -345,7 +353,7 @@ def toggle_resolved(request, pk):
 
 @api_view(['POST'])
 def mark_read(request, pk):
-    dm = get_object_or_404(DirectMessage, pk=pk, user=request.user)
+    dm = get_object_or_404(DirectMessage, pk=pk, user=_get_user(request))
     dm.is_read = True
     dm.save(update_fields=['is_read'])
     return Response({'id': dm.id, 'is_read': dm.is_read})
@@ -357,7 +365,7 @@ def bulk_resolve(request):
     if not ids:
         return Response({'error': 'ids list is required.'}, status=400)
     count = DirectMessage.objects.filter(
-        user=request.user, id__in=ids
+        user=_get_user(request), id__in=ids
     ).update(is_resolved=True)
     return Response({'resolved_count': count})
 
@@ -366,7 +374,7 @@ def bulk_resolve(request):
 
 @api_view(['GET'])
 def dashboard(request):
-    user = request.user
+    user = _get_user(request)
     days = int(request.query_params.get('days', 30))
 
     stats = get_dm_stats(user)
@@ -392,7 +400,7 @@ def dashboard(request):
 
 @api_view(['GET'])
 def insights(request):
-    user = request.user
+    user = _get_user(request)
     days = int(request.query_params.get('days', 30))
 
     category_data = list(get_category_breakdown(user, days=days))
@@ -458,7 +466,7 @@ def export_report(request):
     writer.writerow(['Timestamp', 'Platform', 'Sender', 'Message', 'Category', 'Products', 'Resolved'])
 
     dms = DirectMessage.objects.filter(
-        user=request.user, direction='inbound', timestamp__gte=since
+        user=_get_user(request), direction='inbound', timestamp__gte=since
     ).select_related('platform', 'classification').prefetch_related(
         'classification__matched_products'
     ).order_by('-timestamp')
@@ -488,7 +496,7 @@ def sync_messages(request):
     if platform:
         # Sync specific platform
         connection = get_object_or_404(
-            SocialPlatform, user=request.user, platform=platform, is_active=True
+            SocialPlatform, user=_get_user(request), platform=platform, is_active=True
         )
         try:
             count = sync_platform_messages(connection)
@@ -497,7 +505,7 @@ def sync_messages(request):
             return Response({'error': str(e)}, status=400)
     else:
         # Sync all platforms
-        results = sync_all_platforms(request.user)
+        results = sync_all_platforms(_get_user(request))
         total = sum(r['synced'] for r in results.values())
         errors = {p: r['error'] for p, r in results.items() if r['error']}
         return Response({
@@ -511,7 +519,7 @@ def sync_messages(request):
 
 @api_view(['GET'])
 def onboarding_status(request):
-    user = request.user
+    user = _get_user(request)
     platforms = SocialPlatform.objects.filter(user=user, is_active=True)
     has_products = Product.objects.filter(user=user).exists()
     has_messages = DirectMessage.objects.filter(user=user).exists()
